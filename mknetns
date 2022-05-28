@@ -1,0 +1,306 @@
+#!/bin/sh
+
+# Create a network namespace, interconnected with "default"
+# namespace, with Internet traffic routing.
+#
+# One use case is to give a "real" IP to a qemu(1) running
+# with the standard user-mode network/port redirections,
+# that is, as an alternative to the usual TUN/TAP+bridge
+# solution.
+#
+# This is clumsier than a TAP interface bridged with the main
+# NIC, see ./mktap, but still can serve as an example; cleaning
+# is a bit better, on some points, by comparison to ./vnet.sh.
+
+set -e
+
+# --------------------------------------------------------------
+# Default
+
+# Force (re)creation of network namespaces and devices
+force=
+
+# Optional routing interface (typically, interface
+# connected to the Internet)
+route=
+
+# Network namespace name
+ns=
+
+# Name of veth interfaces (relative to their respective namespaces,
+# so they can have the same name; we use temporary name $v0/$v1 later
+# on precisely to allow this)
+veth0=vneth0
+veth1=vneth0
+
+# IPs
+ip0=10.0.0.1/29
+ip1=10.0.0.2/29
+
+# External interface, to allow test to connect to
+# the Internet.
+extint=`ip route show default | awk '{ print $5 }'`
+
+# Special iptables(8) comments to easily nuke all rules
+# when cleaning.
+rulestag="mknetns-rules"
+
+# --------------------------------------------------------------
+# help, argv parsing
+
+# Deps
+if ! which ip        >/dev/null; then exit 1; fi
+
+# Helper
+#
+# Input:
+#	$1 : exit code
+help() {
+	p=`basename $0`
+	cat <<EOF
+NAME
+	$p
+
+SYNOPSYS
+	$p [-h]
+	$p [-f] [-c] [-e <ext-int>] [-t <tag>] <ns>
+
+DESCRIPTION
+	$p creates a network namespace, interconnected with the
+	default network namespace by a pair a virtual ethernet
+	devices.
+
+	-c will remove the namespace/virtual ethernet bridge
+	and iptables(8) rules.
+
+	-f will clean things up (like -c) before starting
+
+	-e will use the given network interface instead of the
+	one associated to the default route (currently $extint)
+	to forward traffic of the namespace to the wider Internet.
+
+	-t will use the given tag instead of the default ($rulestag)
+	to identify iptables(8) rules created by $p
+
+EOF
+	exit $1
+}
+
+if [ "$1" = "-h" ] && [ "$2" = "" ]; then help 0; fi
+
+while getopts fce:t: x; do
+	case "$x" in
+		f) force=1            ;;
+		c) clean=1            ;;
+		e) extint="$OPTARG"   ;;
+		t) rulestag="$OPTARG" ;;
+	esac
+done
+shift `expr $OPTIND - 1`
+
+if [ -z "$1" ]; then help 1; fi
+ns=$1
+
+# --------------------------------------------------------------
+# Internal names
+
+# Temporary veth pair interface names
+v0=tmp0
+v1=tmp1
+
+# Special namespace name that is understood to be the
+# default namespace by our code.
+#
+# We could bind /proc/1/ns/net to /var/run/netns/default
+# to make things more regular, but so far, this is
+# implemented with 3 ifs.
+defaultns=default
+
+# iptables(8) option to set tag rules
+comment="-m comment --comment $rulestag"
+
+# --------------------------------------------------------------
+# Internal functions
+
+# Execute a command in a netmork namespace
+#
+# Input:
+#	$1: namespace
+#	$*: command to run
+# Output:
+exns() {
+	if [ "$1" == $defaultns ]; then
+		shift
+		$*
+	else
+		ip netns exec $*
+	fi
+}
+
+# Create a network namespace and bring a loopback
+# interface within
+#
+# Input:
+#	$1 : namespace name
+# Output:
+addns() {
+	ip netns add $1
+	exns $1 ip link set dev lo up
+}
+
+# Delete a network namespace created by addns
+#
+# Input:
+#	$1 : namespace name
+# Output:
+delns() {
+	ip netns del $1
+}
+
+# Create a pair of virtual ethernet devices
+#
+# Input:
+#	$1 : namespace1
+#	$2 : interface name for namespace1
+#	$3 : namespace2
+#	$4 : interface name for namespace2
+# Output:
+mkveth() {
+	ip link add $v0 type veth peer name $v1
+
+	if [ "$1" != $defaultns ]; then ip link set dev $v0 netns $1; fi
+	if [ "$3" != $defaultns ]; then ip link set dev $v1 netns $3; fi
+
+	exns $1 ip link set dev $v0 name $2
+	exns $3 ip link set dev $v1 name $4
+
+	exns $1 ip link set dev $2 up
+	exns $3 ip link set dev $4 up
+}
+
+# Set the ip address of an interface within a namespace
+#
+# Input:
+#	$1: namespace name
+#	$2: interface name
+#	$3: ip address
+# Output:
+setip() { exns $1 ip addr add dev $2 $3; }
+
+# Enable IP forwarding within a given namespace
+#
+# Input:
+#	$1 : namespace
+dofw() {
+	exns $1 echo 1 > /proc/sys/net/ipv4/ip_forward || \
+	exns $1 sysctl net.ipv4.ip_forward=1
+}
+
+# Set firewall to route traffic within given namespace,
+# from a given interface/network to another interface/network
+#
+# Input:
+#	$1: namespace
+#	$2: source interface
+#	$3: destination interface
+
+# Output:
+fwroute() {
+	dofw $1
+	exns $1 iptables -A FORWARD -i $2 -o $3 -j ACCEPT $comment
+}
+
+# Add a routing rule
+# Input:
+#	$1: namespace
+#	$2: destination network (can be 'default')
+#	$3: next-hop
+# Output:
+setroute() {
+	dofw $1
+	exns $1 ip route add $2 via $3
+}
+
+# Set firewall to route traffic 2-ways within a given namespace.
+#
+# Input:
+#	$1: namespace
+#	$2: source interface
+#	$3: destination interface
+# Output:
+fwroute2() {
+	fwroute $1 $2 $3
+	fwroute $1 $3 $2
+}
+
+# Enable NAT
+#
+# Input:
+#	$1: namespace
+#	$2: destination interface
+donat() {
+	dofw $1
+	exns $1 iptables -t nat -A POSTROUTING -o $2 -j MASQUERADE $comment
+}
+
+# Remove iptables(8) rules added by this script
+#
+# Input:
+# Output:
+delrules() {
+	# NOTE: we use grep(1) to allow $rulestag to contains
+	# things that would mess up sed(1) (e.g. '/')
+	iptables-save | grep -F -- "--comment $rulestag" | \
+		sed -n '/FORWARD/s/^-A/iptables -D/p' | sh
+	iptables-save | grep -F -- "--comment $rulestag" | \
+		sed -n '/POSTROUTING/s/^-A/iptables -t nat -D/p' | sh
+}
+
+# --------------------------------------------------------------
+# Main
+
+# If -force is specified, remove $ns, $veth0, $veth1 and flush
+# forwarding rules.
+if [ -n "$force" ] || [ -n "$clean" ]; then
+	if ip netns list | grep -q $ns; then
+		delns $ns
+	fi
+
+	# $veth1 would have been deleted by $ns removal
+	if ip link show dev $veth0 >/dev/null 2>/dev/null; then
+		ip link delete dev $veth0
+	fi
+	delrules
+fi
+
+# We're done cleaning
+if [ -n "$clean" ]; then exit 0; fi
+
+# Create $ns if missing
+if ! ip netns list | grep -q $ns; then
+	addns $ns
+fi
+
+# Assuming $veth1 exists iff $veth0 exists,
+# bring the virtual pair up if it's not
+if ! ip link show dev $veth0 >/dev/null; then
+	mkveth default $veth0 $ns $veth1
+fi
+
+# Set IPs on the virtual pair
+setip default $veth0 $ip0
+setip $ns     $veth1 $ip1
+
+# Route traffic
+donat        default         $extint
+fwroute2     default $veth0  $extint
+setroute     $ns     default `echo $ip0 | awk -F'/' '{ print $1 }'`
+
+# Details are still unclear, but having IPv6 enabled wreaks
+# things up, see for instance:
+# https://askubuntu.com/questions/905866/new-ubuntu-17-04-problem-your-connection-was-interrupted
+exns default sysctl net.ipv6.conf.$veth0.disable_ipv6=1
+exns $ns     sysctl net.ipv6.conf.$veth1.disable_ipv6=1
+
+# Ensure we can ping the Internet from the namespace
+exns $ns ping -c3 google.fr

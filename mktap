@@ -1,0 +1,130 @@
+#!/bin/sh
+
+set -e
+
+# Creates a tap interface, typically for use with
+# a qemu(1) instance.
+
+force=
+clean=
+
+tap=tap0
+br=br0
+
+# External interface, to allow test to connect to
+# the Internet.
+extint=`ip route show default | awk '{ print $5;exit 0 }'`
+
+dhclient=dhclient
+
+# --------------------------------------------------------------
+# deps, help, argv parsing
+
+# Deps
+if ! which $dhclient >/dev/null; then exit 1; fi
+if ! which ip        >/dev/null; then exit 1; fi
+
+# Helper
+#
+# Input:
+#	$1 : exit code
+help() {
+	p=`basename $0`
+	cat <<EOF
+NAME
+	$p
+
+SYNOPSYS
+	$p [-h]
+	$p [-f] [-c] [-e <ext-int>] [-b <bridge-int>] [tap-int]
+
+DESCRIPTION
+	$p creates a TUN/TAP interface, bridged with the main network
+	interface, automatically selected as the one associated to
+	the default route.
+
+	-c will clean the tap interface, the bridge one, and restore
+	the external network interface
+
+	-f will clean things up (like -c) before starting
+
+	-e will change the default network interface ($extint) to
+	the one specified.
+
+	-b will change the default bridge interface ($br) to
+	the one specified
+
+	The default tap interface is $tap.
+
+EXAMPLE
+	$p can be used to create a network interface for use with qemu(1):
+
+	# mktap -b br1 tap1
+	$ qemu                                                          \\
+		-device e1000,netdev=mynet0,mac=52:55:00:d9:46:33           \\
+		-netdev "tap,id=mynet0,ifname=tap1,script=no,downscript=no" \\
+		...
+	# mktap -b br1 -c tap1
+
+	You'll want to explicitely use script=no and downscript=no to
+	disable the default scripts, which would otherwise be triggered.
+
+SEE ALSO
+	ip(8) dhclient(8)
+
+EOF
+	exit $1
+}
+
+if [ "$1" = "-h" ] && [ "$2" = "" ]; then help 0; fi
+
+while getopts fce:b: x; do
+	case "$x" in
+		f) force=1            ;;
+		c) clean=1            ;;
+		e) extint=$OPTARG     ;;
+		b) br=$OPTARG         ;;
+	esac
+done
+shift `expr $OPTIND - 1`
+
+if [ -n "$1" ]; then tap="$1"; fi
+
+# --------------------------------------------------------------
+# Main
+
+# Remove $tap0/$br; re-enable $extint # as the main external
+# network interface instead of $br.
+if [ -n "$force" ] || [ -n "$clean" ]; then
+	ip link set $extint nomaster
+
+	if ip link show $tap >/dev/null 2>&1; then
+		ip link set $tap    nomaster
+		ip link del $tap
+	fi
+	if ip link show $br >/dev/null 2>&1; then
+		ip link delete $br type bridge
+	fi
+	$dhclient $extint >/dev/null 2>&1
+fi
+
+# We're done cleaning
+if [ -n "$clean" ]; then exit 0; fi
+
+# Create $tap if it's missing, and bring it up
+if ! ip link show $tap >/dev/null 2>&1; then
+	ip tuntap add mode tap $tap
+fi
+ip link set $tap up
+
+# Create $br if it's missing
+if ! ip link show $br >/dev/null 2>&1; then
+	ip link add name $br type bridge
+fi
+# Bridge $extint and $tap under $br
+ip link set $extint master $br
+ip link set $tap    master $br
+
+# We need to reconnect to the external
+# network, this time through $br instead of $extint
+$dhclient $br >/dev/null 2>&1

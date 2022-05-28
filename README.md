@@ -6,7 +6,21 @@ rely the following abstractions:
 - A switch is a list of virtual ethernet ends glued through a bridge.
 - A router is a machine able to route traffic between two interfaces/network.
 
-# mkswitch1.sh 
+# mktap
+Simple, standalone script to create/remove a bridged TUN/TAP interface,
+typically for use with qemu(1).
+
+# mknetns
+Recent re-use of some of vnet.sh to create a a network namespace,
+interconnected with "default" namespace, with Internet traffic
+routing.
+
+One use case is to give a "real" IP to a qemu(1) running
+with the standard user-mode network/port redirections,
+that is, as an alternative to the usual TUN/TAP+bridge
+solution.
+
+# mkswitch1.sh
 Deprecated. Included for curiosity.
 
 # Using vnet.sh
@@ -37,7 +51,7 @@ static routes through `setroute`. Packets forwarding can be done
 through `doroute`.
 
 # Tools
-## utils/links.sh 
+## utils/links.sh
 Use [graphviz](http://www.graphviz.org/) to generate a simple graph of
 machines interconnection from configuration file. One can surely extend
 it to include more data, such as IPs, interfaces, etc.
@@ -47,11 +61,11 @@ Awk script allowing to automatically generate network from a lists like
 this (`samples/3.conf`):
 
     # CIDR         gateway? Machines...
-    10.0.0.0/29     -g      leo     regulus  denebola    
-    172.16.0.0/29   -g      gemini  pollux   castor      
+    10.0.0.0/29     -g      leo     regulus  denebola
+    172.16.0.0/29   -g      gemini  pollux   castor
     192.168.1.0/29  -g      orion   rigel    betelgeuse  bellatrix  saiph
-    10.1.0.0/30             leo     gemini  
-    10.2.0.0/30             gemini  orion   
+    10.1.0.0/30             leo     gemini
+    10.2.0.0/30             gemini  orion
 
 The `-g` indicates that the first machine is the gateway for the
 network. This will automatically set routes for other machines.
@@ -59,7 +73,7 @@ network. This will automatically set routes for other machines.
 Note that `utils/genconf.awk`'s output is usually not ready for direct use:
 it merely automatize the creation of a network.
 
-You'll need [cidrc](https://github.com/m-b-/cidrc) to use this script,
+You'll need [cidrc](https://github.com/mbivert/cidrc) to use this script,
 or a program able to list availables IPs from a netwok CIDR.
 
 # Samples
@@ -83,10 +97,10 @@ Append thoses routes to `samples/3bis.sh` to re-obtain `samples/3.sh`'s:
 
     setroute  leo     192.168.1.0/29  10.1.0.2
     setroute  leo     172.16.0.0/29   10.1.0.2
-    
+
     setroute  gemini  10.0.0.0/29     10.1.0.1
     setroute  gemini  192.168.1.0/29  10.2.0.2
-    
+
     setroute  orion   10.0.0.0/29     10.2.0.1
     setroute  orion   172.16.0.0/29   10.2.0.1
 

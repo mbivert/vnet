@@ -101,7 +101,7 @@ donat() {
 
 # Add a routing rule
 # $1: namespace
-# $2: destination network (can be 'defautlt')
+# $2: destination network (can be 'default')
 # $3: next-hop
 setroute() {
 	dofw $1
@@ -126,8 +126,8 @@ fwroute() {
 # $4: destination interface
 # $5: destination network
 fwroute2() {
-	doroute $1 $2 $3 $4 $5
-	doroute $1 $4 $5 $2 $3
+	fwroute $1 $2 $3 $4 $5
+	fwroute $1 $4 $5 $2 $3
 }
 
 # Check (ICMP ping) a machine can contact a given IP and report

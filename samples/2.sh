@@ -28,7 +28,7 @@ setroute	moon	172.16.0.0/29	10.0.0.1
 setroute	saturn	10.0.0.0/29		172.16.0.1
 setroute	titan	10.0.0.0/29		172.16.0.1
 
-doroute2	sun		eth0	10.0.0.0/29	eth1	172.16.0.0/29
+fwroute2	sun		eth0	10.0.0.0/29	eth1	172.16.0.0/29
 
 check		saturn	10.0.0.2
 check		moon	172.16.0.3
