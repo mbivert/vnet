@@ -7,15 +7,17 @@ set -e
 
 force=
 clean=
+no6=
 
 tap=tap0
 br=br0
 
-# External interface, to allow test to connect to
-# the Internet.
-extint=`ip route show default | awk '{ print $5;exit 0 }'`
+# Current external interface/current gateway
+extint=`ip route show default | awk '{print $5;exit 0}'`
+gw=`ip route show default | awk '{print $3;exit 0}'`
 
 dhclient=dhclient
+leased=/var/lib/dhcpcd/
 
 # --------------------------------------------------------------
 # deps, help, argv parsing
@@ -36,25 +38,34 @@ NAME
 
 SYNOPSYS
 	$p [-h]
-	$p [-f] [-c] [-e <ext-int>] [-b <bridge-int>] [tap-int]
+	$p [-f] [-c] [-n] [-e <ext-int>] [-g <gw>] [-b <bridge-int>] [tap-int]
 
 DESCRIPTION
 	$p creates a TUN/TAP interface, bridged with the main network
 	interface, automatically selected as the one associated to
 	the default route.
 
+	-f will clean things up (like -c) before starting
+
 	-c will clean the tap interface, the bridge one, and restore
 	the external network interface
 
-	-f will clean things up (like -c) before starting
+	-n will disable IPv6 on the bridge and tap interface
 
 	-e will change the default network interface ($extint) to
 	the one specified.
+
+	-g will set the gateway to be used for the new default route
+	that'll go through the bridge interface
 
 	-b will change the default bridge interface ($br) to
 	the one specified
 
 	The default tap interface is $tap.
+
+	Special care is taken to fully disable the previous external
+	interface, so that it doesn't interfere with the bridge interface,
+	which will now act as the external interface.
 
 EXAMPLE
 	$p can be used to create a network interface for use with qemu(1):
@@ -78,17 +89,29 @@ EOF
 
 if [ "$1" = "-h" ] && [ "$2" = "" ]; then help 0; fi
 
-while getopts fce:b: x; do
+while getopts fce:g:b: x; do
 	case "$x" in
 		f) force=1            ;;
 		c) clean=1            ;;
+		n) no6=1              ;;
 		e) extint=$OPTARG     ;;
+		g) gw=$OPTARG         ;;
 		b) br=$OPTARG         ;;
 	esac
 done
 shift `expr $OPTIND - 1`
 
 if [ -n "$1" ]; then tap="$1"; fi
+
+if [ -z "$extint" ]; then
+	echo No external interface provided/guessed 1>&2
+	exit 1
+fi
+
+if [ -z "$gw" ]; then
+	echo No gateway provided/guessed 1>&2
+	exit 1
+fi
 
 # --------------------------------------------------------------
 # Main
@@ -102,10 +125,16 @@ if [ -n "$force" ] || [ -n "$clean" ]; then
 		ip link set $tap    nomaster
 		ip link del $tap
 	fi
+
+	# XXX this should also nuke the default route via $br
 	if ip link show $br >/dev/null 2>&1; then
 		ip link delete $br type bridge
 	fi
+
 	$dhclient $extint >/dev/null 2>&1
+	if ! ip route show default via $gw dev $extint >/dev/null 2>&1; then
+		ip route add default via $gw dev $extint
+	fi
 fi
 
 # We're done cleaning
@@ -125,6 +154,27 @@ fi
 ip link set $extint master $br
 ip link set $tap    master $br
 
+# Fully disable $extint: kill dhclient & remove default route
+if ip route show default via $gw dev $extint >/dev/null 2>&1; then
+	ip route del default via $gw dev $extint
+fi
+pkill $dhclient
+if [ -e $leased/dhcpcd-$extint.lease ]; then
+	rm $leased/dhcpcd-$extint.lease
+fi
+
 # We need to reconnect to the external
 # network, this time through $br instead of $extint
 $dhclient $br >/dev/null 2>&1
+
+# Make sure the default route uses the bridge interface:
+if ! ip route show default via $gw dev $br >/dev/null 2>&1; then
+	ip route add default via $gw dev $br
+fi
+
+# Seems there could be issues around there:
+#	https://askubuntu.com/questions/905866/new-ubuntu-17-04-problem-your-connection-was-interrupted
+if [ -n "$no6" ]; then
+	sysctl -q net.ipv6.conf.$tap.disable_ipv6=1
+	sysctl -q net.ipv6.conf.$br.disable_ipv6=1
+fi
